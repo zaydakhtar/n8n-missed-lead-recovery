@@ -1,1 +1,264 @@
-
+{
+  "name": "Missed Lead Recovery — MVP (Workflow A)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lead-intake",
+        "authentication": "headerAuth",
+        "options": {}
+      },
+      "id": "9f31fbc7-e474-4850-b528-74552da0b9ce",
+      "name": "Webhook — Lead Intake",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        -1200,
+        112
+      ],
+      "webhookId": "lead-intake",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "GRIWvPkvsKYbfsuU",
+          "name": "Header Auth account"
+        }
+      },
+      "notes": "CONFIGURE: Path is set to lead-intake. Add a Header Auth credential. Set header name to x-tally-secret and value to YOUR_TALLY_SECRET_HEADER. In Tally, add a custom header with the same name and value under Integrations > Webhooks."
+    },
+    {
+      "parameters": {
+        "jsCode": "// NODE 2 - CLEAN AND NORMALISE DATA\n// CONFIGURE: Adjust field label strings on lines 12-16\n// if your Tally form uses different field labels.\n\nconst body = $input.first().json.body || $input.first().json;\nconst fields = body.fields || [];\n\nconst getField = (label) => {\n  const f = fields.find(f =>\n    f.label && f.label.toLowerCase().includes(label.toLowerCase())\n  );\n  return f ? (f.value || '').toString().trim() : '';\n};\n\nconst name    = getField('name') || getField('full name') || '';\nconst email   = (getField('email') || '').toLowerCase().trim();\nconst phone   = getField('phone') || getField('telephone') || '';\nconst message = getField('message') || getField('enquiry') || '';\nconst source  = body.formName || 'tally-form';\n\nif (!name || !email || !message) {\n  return [{ json: { status: 'Invalid', error: 'Missing required fields' } }];\n}\n\nconst suffix  = Math.random().toString(36).substring(2, 6);\nconst lead_id = Date.now() + '-' + suffix;\n\nlet normPhone = phone.replace(/[\\s\\-\\(\\)]/g, '');\nif (normPhone.startsWith('0') && normPhone.length === 11) {\n  normPhone = '+44' + normPhone.slice(1);\n}\n\nreturn [{ json: {\n  lead_id,\n  timestamp: new Date().toISOString(),\n  name, email,\n  phone: normPhone || phone,\n  message, source\n}}];"
+      },
+      "id": "ffbb6c10-8589-46f7-b0a9-20c2410f7763",
+      "name": "Code — Clean and Normalise",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -960,
+        112
+      ],
+      "notes": "CONFIGURE: Check field label matching (getField calls) match your Tally form field names. No API keys required here."
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sheet1",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Lead_ID": "={{ $json.lead_id }}",
+            "Timestamp": "={{ $json.timestamp }}",
+            "Name": "={{ $json.name }}",
+            "Email": "={{ $json.email }}",
+            "Phone": "={{ $json.phone }}",
+            "Message": "={{ $json.message }}",
+            "Source": "={{ $json.source }}",
+            "Status": "New",
+            "AI_Response": "pending",
+            "Follow_up_sent": "No",
+            "Priority": "TBD",
+            "Classification": "TBD",
+            "Notes": ""
+          }
+        },
+        "options": {}
+      },
+      "id": "96bd914d-267c-42b9-b201-3861991d2a7b",
+      "name": "Google Sheets — Log Lead",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        -720,
+        112
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "u2zjPmhE73Fysahp",
+          "name": "Google Sheets account"
+        }
+      },
+      "notes": "CONFIGURE: Replace YOUR_GOOGLE_SHEET_ID with the ID from your sheet URL (the string between /d/ and /edit). Set up Google Sheets OAuth2 credential first. Row 1 of your sheet must have the exact column headers listed in Section 4."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer YOUR_GROQ_API_KEY"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"llama-3.3-70b-versatile\",\n  \"max_tokens\": 400,\n  \"temperature\": 0.4,\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are a professional customer response assistant for a UK local service business. Respond on behalf of the business. Be warm, professional, concise. Never invent services or promise prices. Always end with a next step. Return ONLY valid JSON, no markdown, no preamble.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"TASK: Respond to this enquiry AND classify it.\\n\\nBusiness type: YOUR_BUSINESS_TYPE\\nBusiness name: YOUR_BUSINESS_NAME\\nCustomer name: {{ $json.name }}\\nCustomer message: {{ $json.message }}\\n\\nReturn ONLY this JSON:\\n{\\n  \\\"reply\\\": \\\"professional reply, max 120 words\\\",\\n  \\\"classification\\\": \\\"hot|warm|cold\\\",\\n  \\\"urgency\\\": \\\"high|medium|low\\\",\\n  \\\"intent\\\": \\\"ready_to_buy|researching|just_browsing\\\",\\n  \\\"reason\\\": \\\"one sentence explaining classification\\\",\\n  \\\"priority\\\": \\\"High|Medium|Low\\\"\\n}\"\n    }\n  ]\n}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "247292c6-c58f-4a48-a36d-e783b30ec7d3",
+      "name": "HTTP Request — Groq AI",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -480,
+        112
+      ],
+      "notes": "CONFIGURE: Replace YOUR_GROQ_API_KEY in the Authorization header. Replace YOUR_BUSINESS_NAME and YOUR_BUSINESS_TYPE in the user prompt. Get your key free from console.groq.com. If Groq rate limit hit (429), the retry handles it once. If both fail, workflow continues with fallback in Node 5."
+    },
+    {
+      "parameters": {
+        "jsCode": "// NODE 5 - PARSE GROQ RESPONSE\n// CONFIGURE: No changes needed.\n// Handles markdown fences and JSON parse failures gracefully.\n\nconst fallback = 'Thank you for your enquiry. We have received your message and a member of our team will be in touch with you shortly.';\n\ntry {\n  const data = $input.first().json;\n  let raw = data.choices[0].message.content;\n\n  raw = raw.replace(/^```json\\s*/i, '').replace(/^```\\s*/i, '').replace(/```\\s*$/i, '').trim();\n\n  const p = JSON.parse(raw);\n\n  return [{ json: {\n    ...$input.first().json,\n    reply:          p.reply          || fallback,\n    classification: (p.classification || 'warm').toLowerCase(),\n    urgency:        (p.urgency        || 'medium').toLowerCase(),\n    intent:         p.intent          || 'researching',\n    reason:         p.reason          || '',\n    priority:       p.priority        || 'Medium',\n    parse_success:  true\n  }}];\n\n} catch (err) {\n  return [{ json: {\n    ...$input.first().json,\n    reply:         fallback,\n    classification:'warm',\n    urgency:       'medium',\n    intent:        'researching',\n    reason:        'Parse error - fallback used',\n    priority:      'Medium',\n    parse_success: false,\n    parse_error:   err.message\n  }}];\n}"
+      },
+      "id": "8e0d5492-0259-4811-8aea-7af23911111c",
+      "name": "Code — Parse Groq Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -240,
+        112
+      ],
+      "notes": "CONFIGURE: No changes needed. Strips markdown fences Groq sometimes adds. Falls back to a safe reply if JSON parsing fails — the workflow always continues."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.brevo.com/v3/smtp/email",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "api-key",
+              "value": "YOUR_BREVO_API_KEY"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"sender\": {\n    \"name\": \"YOUR_BUSINESS_NAME\",\n    \"email\": \"YOUR_VERIFIED_SENDING_EMAIL\"\n  },\n  \"to\": [{ \"email\": \"{{ $json.email }}\", \"name\": \"{{ $json.name }}\" }],\n  \"subject\": \"We received your enquiry — YOUR_BUSINESS_NAME\",\n  \"textContent\": \"{{ $json.reply }}\\n\\nKind regards,\\nYOUR_BUSINESS_NAME Team\"\n}",
+        "options": {}
+      },
+      "id": "2d0da45d-55ca-471c-b545-69240ce80ac7",
+      "name": "HTTP Request — Brevo Email",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        0,
+        0
+      ],
+      "notes": "CONFIGURE: Replace YOUR_BREVO_API_KEY (from brevo.com > API Keys). Replace YOUR_BUSINESS_NAME and YOUR_VERIFIED_SENDING_EMAIL. IMPORTANT: the sending email domain MUST be verified in Brevo or emails will fail/spam. Never use Gmail or Hotmail as sender address."
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_TELEGRAM_CHAT_ID",
+        "text": "=🔴 NEW LEAD — YOUR_BUSINESS_NAME\n\nName: {{ $json.name }}\nPhone: {{ $json.phone }}\nEmail: {{ $json.email }}\n\nClassification: {{ $json.classification }}\nPriority: {{ $json.priority }}\nUrgency: {{ $json.urgency }}\n\nMessage: \"{{ $json.message }}\"\n\nReason: {{ $json.reason }}\n\nAI reply sent automatically.",
+        "additionalFields": {}
+      },
+      "id": "415074f7-2c59-4ed3-893d-b306a343e197",
+      "name": "Telegram — Owner Alert",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [
+        0,
+        224
+      ],
+      "webhookId": "192d5a4d-e2ea-4102-ad57-594b7ba15636",
+      "notes": "CONFIGURE: Replace YOUR_TELEGRAM_CHAT_ID with your numeric chat ID. Set up Telegram credential with YOUR_TELEGRAM_BOT_TOKEN (from @BotFather). In MVP this fires on every lead. In production, wrap in an IF node to only alert on hot/urgent leads."
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook — Lead Intake": {
+      "main": [
+        [
+          {
+            "node": "Code — Clean and Normalise",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code — Clean and Normalise": {
+      "main": [
+        [
+          {
+            "node": "Google Sheets — Log Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Sheets — Log Lead": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request — Groq AI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request — Groq AI": {
+      "main": [
+        [
+          {
+            "node": "Code — Parse Groq Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code — Parse Groq Response": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request — Brevo Email",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Telegram — Owner Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "42e7b396-674c-4d63-be1e-302f996c31f4",
+  "meta": {
+    "instanceId": "7f47abdb989b43625cc733228140a73b0900ea05b024731581ae6f7371b7fad6"
+  },
+  "id": "5JH6WOmBsPaDBWpN",
+  "tags": []
+}
